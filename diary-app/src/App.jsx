@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
+import VaultGate from './VaultGate'
+import {
+  loadEncryptedData, saveEncryptedData, saveEncryptedMedia,
+  getDecryptedMedia, deleteEncryptedMedia, regenerateRecoveryCode
+} from './secureStorage'
 import {
   Bar, BarChart, Line, LineChart, Pie, PieChart, Cell, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis, Legend
 } from 'recharts'
 import './App.css'
 import {
-  createEmptyDay, loadData, saveData, saveMedia, getMedia, deleteMedia
+  createEmptyDay, loadData, getMedia, deleteMedia
 } from './storage'
 
 const moods = ['😭', '😞', '🙁', '😐', '🙂', '☺️', '🥹']
@@ -43,7 +48,7 @@ function MediaItem({block,onDelete,onSize}) {
   useEffect(() => {
     let objectUrl = ''
     let active = true
-    getMedia(block.mediaId).then(item => {
+    getDecryptedMedia(block.mediaId).then(item => {
       if (active && item?.blob) { objectUrl = URL.createObjectURL(item.blob); setUrl(objectUrl) }
     }).catch(console.error)
     return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl) }
@@ -58,8 +63,13 @@ function MediaItem({block,onDelete,onSize}) {
   </figure>
 }
 
-function App() {
-  const [data,setData] = useState(loadData)
+function DiaryApp() {
+  const [data,setData] = useState({
+    settings:{periodEnabled:false,ledgerEnabled:false,appLockEnabled:false},
+    days:{},
+    ledgerTags:['餐饮','交通','购物','日用品','娱乐','医疗','学习','住房','收入','其他']
+  })
+  const [dataReady,setDataReady] = useState(false)
   const [date,setDate] = useState(today)
   const [ledgerDate,setLedgerDate] = useState(today)
   const [page,setPage] = useState('diary')
@@ -81,13 +91,105 @@ function App() {
   const [editingTag,setEditingTag] = useState('')
   const [newTag,setNewTag] = useState('')
   const [amountDraft,setAmountDraft] = useState({})
+
   const day = data.days[date] || createEmptyDay()
   const ledgerDay = data.days[ledgerDate] || createEmptyDay()
   const palette = palettes[data.settings.themeIndex || 0] || palettes[0]
   const themeScope = data.settings.themeScope || 'accent'
   const splitDirection = data.settings.splitDirection || 'vertical'
 
-  useEffect(() => { saveData(data) },[data])
+  useEffect(() => {
+    let active = true
+    async function initialize() {
+      try {
+        let encrypted = await loadEncryptedData()
+        if (!encrypted) {
+          // 首次启用：迁移旧日记，并加密旧附件
+          const legacy = loadData()
+          const migrated = {
+            ...legacy,
+            days: { ...legacy.days }
+          }
+
+          for (const [dayKey, dayValue] of Object.entries(migrated.days)) {
+            const blocks = []
+            for (const block of (dayValue.blocks || [])) {
+              if (block.type === 'media' && block.mediaId) {
+                try {
+                  const oldMedia = await getMedia(block.mediaId)
+                  if (!oldMedia?.blob) {
+                    throw new Error('找不到旧附件：' + block.mediaId)
+                  }
+                  const file = new File(
+                    [oldMedia.blob],
+                    oldMedia.name || block.name || 'diary-media',
+                    { type: oldMedia.type || block.mediaType || oldMedia.blob.type }
+                  )
+                  const saved = await saveEncryptedMedia(file)
+                  blocks.push({
+                    ...block,
+                    mediaId: saved.id,
+                    mediaType: saved.type,
+                    name: saved.name
+                  })
+                  continue
+                } catch (error) {
+                  console.error('附件迁移失败：', block.mediaId, error)
+                  throw new Error('旧附件迁移失败。旧数据尚未删除，请检查后重试。', { cause: error })
+                }
+              }
+              blocks.push(block)
+            }
+            migrated.days[dayKey] = { ...dayValue, blocks }
+          }
+
+          await saveEncryptedData(migrated)
+          encrypted = await loadEncryptedData()
+          if (!encrypted) throw new Error('加密数据验证失败')
+
+          // 每个附件都必须能够成功解密，才允许清理旧数据
+          for (const dayValue of Object.values(encrypted.days || {})) {
+            for (const block of (dayValue.blocks || [])) {
+              if (block.type === 'media' && block.mediaId) {
+                const check = await getDecryptedMedia(block.mediaId)
+                if (!check?.blob || check.blob.size === 0) {
+                  throw new Error('加密附件验证失败：' + block.mediaId)
+                }
+              }
+            }
+          }
+
+          // 数据和附件均验证成功后，才清理旧明文数据和旧附件
+          for (const dayValue of Object.values(legacy.days || {})) {
+            for (const block of (dayValue.blocks || [])) {
+              if (block.type === 'media' && block.mediaId) {
+                await deleteMedia(block.mediaId)
+              }
+            }
+          }
+          localStorage.removeItem('diary_app_data_v1')
+        }
+
+        if (active) {
+          setData(encrypted)
+          setDataReady(true)
+        }
+      } catch (error) {
+        console.error(error)
+        alert('日记加载或迁移失败：' + error.message + '。请勿清理浏览器数据。')
+      }
+    }
+    initialize()
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    if (!dataReady) return
+    saveEncryptedData(data).catch(error => {
+      console.error('加密保存失败：', error)
+      alert('日记加密保存失败，请保持页面打开并检查浏览器存储。')
+    })
+  },[data,dataReady])
   useEffect(() => {
     const root=document.documentElement
     root.style.setProperty('--accent',palette.a)
@@ -112,11 +214,6 @@ function App() {
     const blocks = (data.days[which] || createEmptyDay()).blocks.map(b=>b.id===id?{...b,...patch}:b)
     updateDay(which,'blocks',blocks)
   }
-  function insertBlock(which,index,block) {
-    const blocks = [...((data.days[which] || createEmptyDay()).blocks)]
-    blocks.splice(index,0,block)
-    updateDay(which,'blocks',blocks)
-  }
   async function addFiles(event) {
     const files = Array.from(event.target.files || [])
     if (!files.length) return
@@ -125,7 +222,7 @@ function App() {
       const added=[]
       for (const file of files) {
         if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) continue
-        const saved=await saveMedia(file)
+        const saved=await saveEncryptedMedia(file)
         added.push({id:crypto.randomUUID(),type:'media',mediaId:saved.id,mediaType:saved.type,name:saved.name,size:'medium'})
       }
       const current = data.days[date] || createEmptyDay()
@@ -137,24 +234,24 @@ function App() {
     finally { setBusy(false); event.target.value=''; setInsertAfter(null) }
   }
   async function removeBlock(which,block) {
-    if(block.type==='media') await deleteMedia(block.mediaId)
+    if(block.type==='media') await deleteEncryptedMedia(block.mediaId)
     const current=data.days[which] || createEmptyDay()
     updateDay(which,'blocks',current.blocks.filter(b=>b.id!==block.id))
   }
-  function clearSelected() {
+  async function clearSelected() {
     const labels={all:'当天全部内容',diary:'日记文字和图片视频',records:'天气、心情和经期记录',ledger:'当天记账记录'}
     if(!confirm(`确定清除「${date}」的${labels[clearScope]}吗？此操作无法撤销。`)) return
     if(clearScope==='all') {
-      day.blocks.filter(b=>b.type==='media').forEach(b=>deleteMedia(b.mediaId))
+      await Promise.all(day.blocks.filter(b=>b.type==='media').map(b=>deleteEncryptedMedia(b.mediaId)))
       setData(prev=>{const days={...prev.days};delete days[date];return {...prev,days}})
     } else if(clearScope==='diary') {
-      day.blocks.filter(b=>b.type==='media').forEach(b=>deleteMedia(b.mediaId))
+      await Promise.all(day.blocks.filter(b=>b.type==='media').map(b=>deleteEncryptedMedia(b.mediaId)))
       updateDay(date,'blocks',[{id:crypto.randomUUID(),type:'text',content:''}])
     } else if(clearScope==='records') {
       updateDay(date,'weather','');updateDay(date,'mood','');updateDay(date,'period',{isPeriod:null,flow:'',color:''})
     } else updateDay(date,'expenses',[])
   }
-  const dates=Object.keys(data.days).sort().reverse()
+  const dates=useMemo(()=>Object.keys(data.days).sort().reverse(),[data.days])
   const searchResults=useMemo(()=>{
     const q=query.trim().toLowerCase()
     return dates.filter(d=>{
@@ -162,7 +259,7 @@ function App() {
       const text=(item.blocks||[]).filter(b=>b.type==='text').map(b=>b.content||'').join(' ').toLowerCase()
       return (!q || text.includes(q)) && (!calendarMonth || d.startsWith(calendarMonth)) && (!searchDate || d===searchDate)
     })
-  },[query,data,calendarMonth,searchDate])
+  },[query,data,calendarMonth,searchDate,dates])
   const ledgerTags=data.ledgerTags?.length?data.ledgerTags:defaultTags
   const ledgerRows=ledgerTags.map(tag=>({tag,amount:(ledgerDay.expenses||[]).filter(e=>e.tag===tag).reduce((s,e)=>s+Number(e.amount||0),0)}))
   const dailyTotal=ledgerTags.reduce((sum,tag)=>sum+Number(amountDraft[tag] ?? ledgerRows.find(r=>r.tag===tag)?.amount ?? 0),0) + (ledgerDay.expenses||[]).filter(e=>!ledgerTags.includes(e.tag)).reduce((s,e)=>s+Number(e.amount||0),0)
@@ -210,6 +307,7 @@ function App() {
     </div>
   }
 
+  if (!dataReady) return <div style={{padding:40,textAlign:'center'}}>正在解密并加载日记……</div>
   return <main className="app-shell">
     <header className="brand-header">
       <div className="brand-word" aria-label="DiArY"><span>D</span><span className="tiny-letter">i</span><span>A</span><span className="tiny-letter">r</span><span>Y</span></div>
@@ -252,18 +350,18 @@ function App() {
       <input id="diary-files" className="hidden-input" type="file" accept="image/*,video/*" multiple disabled={busy} onChange={addFiles}/>
       <div className="diary-actions">
         <label className="gallery-button">＋ 图库<input type="file" accept="image/*,video/*" multiple disabled={busy} onChange={addFiles}/></label>
-        <button className="save-button" onClick={()=>{saveData(data);alert('今天的记录已保存。')}}>保存</button>
+        <button className="save-button" onClick={async()=>{try{await saveEncryptedData(data);alert('今天的记录已加密保存。')}catch(error){alert('保存失败：'+error.message)}}}>保存</button>
         <div className="clear-control"><select value={clearScope} onChange={e=>setClearScope(e.target.value)}><option value="all">全部</option><option value="diary">日记和附件</option><option value="records">天气、心情、经期</option><option value="ledger">记账</option></select><button className="quiet danger-text" onClick={clearSelected}>清空</button></div>
       </div>
       {busy&&<p className="muted">正在添加附件……</p>}
-      <p className="save-status">自动保存已开启 · 内容保存在当前浏览器</p>
+      <p className="save-status">自动加密保存已开启 · 日记内容在本设备加密存储</p>
     </section>}
 
     {page==='search' && <section className="page-card">
       <div className="section-heading"><span className="eyebrow">FIND A MOMENT</span><h1>搜索<span>.</span></h1></div>
       <input className="search-input" value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索日记里的文字……"/>
       <div className="search-filter"><label>按日期</label><input type="date" value={searchDate} onChange={e=>setSearchDate(e.target.value)}/><label>按月份</label><input type="month" value={calendarMonth} onChange={e=>setCalendarMonth(e.target.value)}/><button className="text-link" onClick={()=>{setSearchDate('');setCalendarMonth('')}}>清除日期筛选</button></div>
-      <div className="result-list">{searchResults.map(d=>{const p=data.days[d].period||{};return <button key={d} className="result-card" onClick={()=>goDiary(d)}><span>{d}</span><strong>{data.days[d].mood||'—'}　{data.days[d].weather||''}{data.settings.periodEnabled&&p.isPeriod===true?`　经期${p.flow?' · '+p.flow:''}${p.color?' · '+p.color:''}`:data.settings.periodEnabled&&p.isPeriod===false?'　不在经期':''}</strong><p>{textForSearch(data.days[d]).trim()||'（这一天没有文字内容）'}</p></button>})}
+      <div className="result-list">{searchResults.map(d=>{const p=data.days[d].period||{};return <button key={d} className="result-card" onClick={()=>goDiary(d)}><span>{d}</span><strong>{data.days[d].mood||'—'} {data.days[d].weather||''}{data.settings.periodEnabled&&p.isPeriod===true?` 经期${p.flow?' · '+p.flow:''}${p.color?' · '+p.color:''}`:data.settings.periodEnabled&&p.isPeriod===false?' 不在经期':''}</strong><p>{textForSearch(data.days[d]).trim()||'（这一天没有文字内容）'}</p></button>})}
         {!searchResults.length&&<p className="empty-state">没有找到记录。试试其他文字或月份。</p>}</div>
     </section>}
 
@@ -291,6 +389,18 @@ function App() {
     {page==='settings' && <section className="page-card">
       <div className="section-heading"><span className="eyebrow">MAKE IT YOURS</span><h1>设置<span>.</span></h1></div>
       <div className="setting-list">
+        <div className="setting-item">
+          <span><strong>重新生成恢复码</strong><small>旧恢复码将立即失效，请保存新恢复码</small></span>
+          <button type="button" className="text-link" onClick={async()=>{
+            if(!confirm('重新生成后，旧恢复码将失效。确定继续吗？')) return
+            try {
+              const code = await regenerateRecoveryCode()
+              alert('请立即保存新的恢复码：\\n\\n' + code + '\\n\\n关闭此提示后将无法再次查看。')
+            } catch(error) {
+              alert('恢复码生成失败：' + error.message)
+            }
+          }}>重新生成</button>
+        </div>
         <label className="setting-item"><span><strong>开启经期记录</strong><small>在日记页面显示经期记录入口</small></span><input type="checkbox" checked={!!data.settings.periodEnabled} onChange={e=>updateSettings('periodEnabled',e.target.checked)}/></label>
         <label className="setting-item"><span><strong>开启记账入口</strong><small>在底部导航中显示记账页面</small></span><input type="checkbox" checked={!!data.settings.ledgerEnabled} onChange={e=>updateSettings('ledgerEnabled',e.target.checked)}/></label>
       </div>
@@ -311,4 +421,8 @@ function App() {
     </nav>
   </main>
 }
-export default App
+export default function App() {
+  const [unlocked, setUnlocked] = useState(false)
+  if (!unlocked) return <VaultGate onUnlocked={() => setUnlocked(true)} />
+  return <DiaryApp />
+}
