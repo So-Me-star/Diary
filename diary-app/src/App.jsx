@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import VaultGate from './VaultGate'
+import AccountGate from './AccountGate'
+import { supabase } from './supabase'
+import { downloadCloudVault, uploadCloudVault } from './cloudSync'
 import {
   loadEncryptedData, saveEncryptedData, saveEncryptedMedia,
   getDecryptedMedia, deleteEncryptedMedia, regenerateRecoveryCode
@@ -422,7 +425,81 @@ function DiaryApp() {
   </main>
 }
 export default function App() {
+  const [session, setSession] = useState(null)
+  const [authReady, setAuthReady] = useState(false)
   const [unlocked, setUnlocked] = useState(false)
-  if (!unlocked) return <VaultGate onUnlocked={() => setUnlocked(true)} />
+  const [cloudReady, setCloudReady] = useState(false)
+  const [cloudMessage, setCloudMessage] = useState('')
+
+  useEffect(() => {
+    let mounted = true
+
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (error) console.error('读取登录状态失败：', error)
+      if (mounted) {
+        setSession(data?.session ?? null)
+        setAuthReady(true)
+      }
+    })
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (mounted) {
+        setSession(nextSession)
+        setUnlocked(false)
+      }
+    })
+
+    return () => {
+      mounted = false
+      listener.subscription.unsubscribe()
+    }
+  }, [])
+
+  if (!authReady) {
+    return <div style={{ padding: 40, textAlign: 'center' }}>正在检查账号登录状态……</div>
+  }
+
+  if (!session) {
+    return <AccountGate onLoggedIn={setSession} />
+  }
+
+  if (!cloudReady) {
+    return (
+      <div style={{ padding: 40, textAlign: 'center' }}>
+        <p>正在连接云端日记……</p>
+        <button onClick={async () => {
+          try {
+            setCloudMessage('正在检查云端数据……')
+            const result = await downloadCloudVault(session.user.id)
+            if (result?.status === 'local_and_cloud_exist') {
+              setCloudMessage('本机和云端都已有保险库。为防止覆盖，暂不自动合并；将优先保留本机数据。')
+            } else if (result?.status === 'downloaded') {
+              setCloudMessage('已下载云端加密保险库。')
+            } else {
+              setCloudMessage('云端暂无保险库，将使用本机保险库。')
+            }
+            setCloudReady(true)
+          } catch (error) {
+            setCloudMessage('云端连接失败：' + error.message)
+          }
+        }}>连接云端</button>
+        {cloudMessage && <p>{cloudMessage}</p>}
+      </div>
+    )
+  }
+
+  if (!unlocked) {
+    return <VaultGate onUnlocked={async () => {
+      setUnlocked(true)
+      try {
+        await uploadCloudVault(session.user.id)
+        setCloudMessage('加密日记已同步到云端。')
+      } catch (error) {
+        console.error('云同步失败：', error)
+        setCloudMessage('云同步失败：' + error.message)
+      }
+    }} />
+  }
+
   return <DiaryApp />
 }

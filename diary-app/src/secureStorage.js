@@ -226,3 +226,51 @@ export async function deleteEncryptedMedia(id) {
   requireUnlocked()
   await removeRecord('media', id)
 }
+
+// 云同步专用：只导出已经加密的保险库封装和日记数据
+export async function exportEncryptedVault() {
+  const vault = await readRecord('vault', 'main')
+  const data = await readRecord('data', 'main')
+
+  if (!vault) return null
+
+  return {
+    version: 1,
+    vault: {
+      version: vault.version,
+      passwordEnvelope: vault.passwordEnvelope,
+      recoveryEnvelope: vault.recoveryEnvelope,
+    },
+    data: data?.envelope ?? null,
+  }
+}
+
+// 仅在本设备尚无保险库时导入，防止覆盖本地数据
+export async function importEncryptedVault(payload) {
+  if (await vaultExists()) {
+    throw new Error('本设备已有保险库，已阻止云端数据覆盖。')
+  }
+
+  if (
+    !payload ||
+    payload.version !== 1 ||
+    !payload.vault?.passwordEnvelope ||
+    !payload.vault?.recoveryEnvelope
+  ) {
+    throw new Error('云端保险库数据格式无效。')
+  }
+
+  await writeRecord('vault', {
+    id: 'main',
+    version: payload.vault.version || 1,
+    passwordEnvelope: payload.vault.passwordEnvelope,
+    recoveryEnvelope: payload.vault.recoveryEnvelope,
+  })
+
+  if (payload.data) {
+    await writeRecord('data', {
+      id: 'main',
+      envelope: payload.data,
+    })
+  }
+}
