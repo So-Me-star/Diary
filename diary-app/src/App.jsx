@@ -66,7 +66,7 @@ function MediaItem({block,onDelete,onSize}) {
   </figure>
 }
 
-function DiaryApp() {
+function DiaryApp({ userId }) {
   const [data,setData] = useState({
     settings:{periodEnabled:false,ledgerEnabled:false,appLockEnabled:false},
     days:{},
@@ -188,11 +188,16 @@ function DiaryApp() {
 
   useEffect(() => {
     if (!dataReady) return
-    saveEncryptedData(data).catch(error => {
-      console.error('加密保存失败：', error)
-      alert('日记加密保存失败，请保持页面打开并检查浏览器存储。')
-    })
-  },[data,dataReady])
+    const timer = setTimeout(async () => {
+      try {
+        await saveEncryptedData(data)
+        if (userId) await uploadCloudVault(userId)
+      } catch (error) {
+        console.error('日记保存或云同步失败：', error)
+      }
+    }, 2000)
+    return () => clearTimeout(timer)
+  }, [data, dataReady, userId])
   useEffect(() => {
     const root=document.documentElement
     root.style.setProperty('--accent',palette.a)
@@ -501,5 +506,5 @@ export default function App() {
     }} />
   }
 
-  return <DiaryApp />
+  return <DiaryApp userId={session.user.id} />
 }
