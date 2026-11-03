@@ -260,21 +260,38 @@ export async function importEncryptedVault(payload) {
     throw new Error('云端保险库数据格式无效。')
   }
 
-  await writeRecord('vault', {
-    id: 'main',
-    version: payload.vault.version || 1,
-    passwordEnvelope: payload.vault.passwordEnvelope,
-    recoveryEnvelope: payload.vault.recoveryEnvelope,
-  })
+  // 保险库和日记数据在同一个 IndexedDB 事务中写入，
+  // 避免只导入一半就中断。
+  const db = await openDB()
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction(
+        payload.data ? ['vault', 'data'] : ['vault'],
+        'readwrite'
+      )
 
-  if (payload.data) {
-    await writeRecord('data', {
-      id: 'main',
-      envelope: payload.data,
+      transaction.objectStore('vault').put({
+        id: 'main',
+        version: payload.vault.version || 1,
+        passwordEnvelope: payload.vault.passwordEnvelope,
+        recoveryEnvelope: payload.vault.recoveryEnvelope,
+      })
+
+      if (payload.data) {
+        transaction.objectStore('data').put({
+          id: 'main',
+          envelope: payload.data,
+        })
+      }
+
+      transaction.oncomplete = resolve
+      transaction.onerror = () => reject(transaction.error)
+      transaction.onabort = () => reject(transaction.error)
     })
+  } finally {
+    db.close()
   }
 }
-
 
 // 云同步：导出附件密文，不解密附件内容
 export async function exportEncryptedMediaRecords() {
@@ -294,7 +311,8 @@ export async function exportEncryptedMediaRecords() {
 
 // 云同步：将下载的附件密文写入本机 IndexedDB
 export async function importEncryptedMediaRecord(record) {
-  requireUnlocked()
+  // 这里只保存附件密文，不需要解锁保险库。
+  // 真正读取和解密附件时仍然必须持有主密钥。
   if (!record?.id || !record?.iv || !record?.ciphertext || !record?.metadata) {
     throw new Error('云端附件数据格式无效')
   }

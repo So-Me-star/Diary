@@ -477,9 +477,13 @@ export default function App() {
             setCloudMessage('正在检查云端数据……')
             const result = await downloadCloudVault(session.user.id)
             if (result?.status === 'local_and_cloud_exist') {
-              setCloudMessage('本机和云端都已有保险库。为防止覆盖，暂不自动合并；将优先保留本机数据。')
+              setCloudMessage('本机和云端都已有不同版本。为保护数据，已暂停自动同步，不会覆盖任何一方。')
             } else if (result?.status === 'downloaded') {
-              setCloudMessage('已下载云端加密保险库。')
+              setCloudMessage('已下载云端加密保险库及附件。')
+            } else if (result?.status === 'resumed') {
+              setCloudMessage('已继续完成此前中断的云端恢复。')
+            } else if (result?.status === 'already_synced') {
+              setCloudMessage('本机与云端版本一致。')
             } else {
               setCloudMessage('云端暂无保险库，将使用本机保险库。')
             }
