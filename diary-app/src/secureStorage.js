@@ -274,3 +274,34 @@ export async function importEncryptedVault(payload) {
     })
   }
 }
+
+
+// 云同步：导出附件密文，不解密附件内容
+export async function exportEncryptedMediaRecords() {
+  requireUnlocked()
+  const db = await openDB()
+  try {
+    return await new Promise((resolve, reject) => {
+      const request = db.transaction('media', 'readonly')
+        .objectStore('media').getAll()
+      request.onsuccess = () => resolve(request.result || [])
+      request.onerror = () => reject(request.error)
+    })
+  } finally {
+    db.close()
+  }
+}
+
+// 云同步：将下载的附件密文写入本机 IndexedDB
+export async function importEncryptedMediaRecord(record) {
+  requireUnlocked()
+  if (!record?.id || !record?.iv || !record?.ciphertext || !record?.metadata) {
+    throw new Error('云端附件数据格式无效')
+  }
+  await writeRecord('media', {
+    id: record.id,
+    iv: record.iv,
+    ciphertext: record.ciphertext,
+    metadata: record.metadata,
+  })
+}
