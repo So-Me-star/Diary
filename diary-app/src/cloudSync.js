@@ -52,6 +52,21 @@ export async function downloadCloudVault(userId) {
   return { status: 'downloaded', updatedAt: data.updated_at }
 }
 
+
+export async function initializeCloudSync(userId) {
+  const { data, error } = await supabase
+    .from('diary_vaults')
+    .select('updated_at')
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (error) throw error
+  if (!data?.updated_at) return false
+
+  localStorage.setItem(syncKey(userId), data.updated_at)
+  return true
+}
+
 export async function uploadCloudVault(userId) {
   const payload = await exportEncryptedVault()
   if (!payload) throw new Error('本设备没有可同步的保险库。')
